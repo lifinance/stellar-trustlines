@@ -12,7 +12,7 @@ trustlines.
 
 ## For partners
 
-Open **https://thesems.github.io/stellar-trustlines/**, paste your collector
+Open **https://lifinance.github.io/stellar-trustlines/**, paste your collector
 address, and the page shows which trustlines are missing. Connect a wallet to
 create them, or download the unsigned transaction and sign it however you
 normally do.
@@ -50,7 +50,7 @@ approved.
 `tokens.json` is the source of truth and is safe to consume directly:
 
 ```
-https://raw.githubusercontent.com/thesems/stellar-trustlines/main/tokens.json
+https://raw.githubusercontent.com/lifinance/stellar-trustlines/main/tokens.json
 ```
 
 Pin a tag instead of `main` if you need a stable snapshot.
