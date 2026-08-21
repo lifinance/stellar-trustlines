@@ -45,9 +45,24 @@ Create the trustline anyway: it is the prerequisite, since the issuer can only
 authorize a trustline that already exists. Then contact the issuer to be
 approved.
 
+## Where the asset list comes from
+
+The page asks the [LI.FI token API](https://li.quest/v1/tokens?chainTypes=STL)
+first, so it tracks what LI.FI can actually route today, and falls back to the
+`tokens.json` snapshot in this repo when the API cannot answer. It says which of
+the two it is showing, under the heading.
+
+The API describes a Stellar token only by its Soroban C-address, but a trustline
+needs the classic `CODE:ISSUER` pair. The page resolves that itself, reading the
+Stellar Asset Contract's instance storage over the same RPC it uses for
+everything else — see `tokens.js`. Tokens with no trustline concept (native XLM,
+non-SAC Soroban tokens) and tokens with no price are left out, matching how
+`tokens.json` is generated.
+
 ## For anyone scripting against this
 
-`tokens.json` is the source of truth and is safe to consume directly:
+`tokens.json` is a published snapshot of that list, and is safe to consume
+directly:
 
 ```
 https://raw.githubusercontent.com/lifinance/stellar-trustlines/main/tokens.json
@@ -92,6 +107,7 @@ python3 -m http.server 8000
 | File | |
 | --- | --- |
 | `index.html` | the page: markup and styles |
+| `tokens.js` | where the asset list comes from: the LI.FI API, or `tokens.json` |
 | `stellar.js` | RPC reads, diffing, transaction building, wallets, submission |
 | `ui.js` | rendering: the asset table, the summary, status messages |
 | `app.js` | the page's state, the actions its buttons trigger, and boot |
@@ -99,8 +115,8 @@ python3 -m http.server 8000
 | `vendor/bundle.min.js` | built dependencies: Stellar SDK + Stellar Wallets Kit |
 | `build/` | the bundle's inputs, so it can be rebuilt and diffed |
 
-Nothing is fetched from a CDN. The three page scripts are plain, readable
-source, loaded in that order; only the third-party dependencies are bundled, and
+Nothing is fetched from a CDN. The four page scripts are plain, readable source,
+loaded in that order; only the third-party dependencies are bundled, and
 `build/` is there so you can reproduce `vendor/bundle.min.js` yourself:
 
 ```bash
@@ -120,9 +136,13 @@ You are being asked to sign transactions from a web page, which is the shape of
 a phishing attack. Reasonable precautions:
 
 - **Check the domain.** Only the URL above is ours.
-- **Read the source.** All page logic is in `stellar.js`, `ui.js` and `app.js`;
-  dependencies are bundled from the pinned inputs in `build/`, with nothing
-  loaded from a CDN.
+- **Read the source.** All page logic is in `tokens.js`, `stellar.js`, `ui.js`
+  and `app.js`; dependencies are bundled from the pinned inputs in `build/`,
+  with nothing loaded from a CDN.
+- **The asset list cannot lie about an issuer.** Whatever the token list says,
+  the `CODE:ISSUER` pair behind each token is read from the asset's contract on
+  mainnet and checked by re-deriving the contract address from it. A pair that
+  does not derive its own contract is dropped, not offered.
 - **Verify the transaction.** Every operation is listed before you sign, and the
   unsigned XDR is always available if you would rather inspect it in
   [Stellar Lab](https://lab.stellar.org).

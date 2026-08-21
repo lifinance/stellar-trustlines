@@ -15,9 +15,21 @@ const setStatus = (message, kind = 'info') => {
 
 const short = (value) => `${value.slice(0, 6)}…${value.slice(-6)}`
 
+/**
+ * Names the list and where it came from. The source matters: the published
+ * snapshot can lag the live list, so a partner reading "tokens.json" knows why
+ * an asset they expect might be absent.
+ */
 const renderManifestMeta = (manifest) => {
-  $('manifest-meta').textContent =
-    `${manifest.assets.length} assets · generated ${manifest.generatedAt.slice(0, 10)}`
+  const skipped = Object.values(manifest.skipped ?? {}).reduce((a, b) => a + b, 0)
+  const parts = [
+    `${manifest.assets.length} assets`,
+    manifest.source === 'api'
+      ? 'live from the LI.FI API'
+      : `from tokens.json, generated ${manifest.generatedAt.slice(0, 10)}`,
+  ]
+  if (skipped > 0) parts.push(`${skipped} token(s) skipped — see the console`)
+  $('manifest-meta').textContent = parts.join(' · ')
 }
 
 const STATUS_LABEL = {

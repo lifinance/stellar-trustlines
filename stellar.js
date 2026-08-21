@@ -26,8 +26,16 @@ const STROOPS_PER_XLM = 10_000_000
 /** `AUTHORIZED_FLAG` on `TrustLineEntry.flags`. */
 const TRUSTLINE_AUTHORIZED = 1
 
-const { xdr, Asset, Account, Keypair, StrKey, TransactionBuilder, Operation } =
-  StellarSdk
+const {
+  xdr,
+  Asset,
+  Account,
+  Contract,
+  Keypair,
+  StrKey,
+  TransactionBuilder,
+  Operation,
+} = StellarSdk
 
 // ---------------------------------------------------------------- RPC
 

@@ -8,8 +8,8 @@
  * reviewed or signed elsewhere.
  *
  * This file holds the page's state and the actions the buttons trigger. The
- * network and transaction work lives in `stellar.js`, the rendering in `ui.js`;
- * both are loaded before this one.
+ * network and transaction work lives in `stellar.js`, the asset list in
+ * `tokens.js` and the rendering in `ui.js`; all are loaded before this one.
  */
 
 /** Everything the page has loaded or derived. */
@@ -193,19 +193,14 @@ function wireActions() {
 // ----------------------------------------------------------------- Boot
 
 async function main() {
+  setStatus('Loading the token list…')
   try {
-    const response = await fetch('./tokens.json')
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    state.manifest = await response.json()
+    state.manifest = await loadManifest()
   } catch (error) {
-    setStatus(`Could not load tokens.json: ${error.message}`, 'error')
+    setStatus(error.message, 'error')
     return
   }
-
-  if (state.manifest.network !== 'public') {
-    setStatus(`Manifest is for ${state.manifest.network}, not mainnet.`, 'error')
-    return
-  }
+  setStatus('')
   renderManifestMeta(state.manifest)
 
   state.kit = initWallets()
