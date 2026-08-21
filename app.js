@@ -140,6 +140,12 @@ function wireConnect() {
     }
     try {
       const address = await connectWallet(state.kit)
+      // Everything else the page renders it derived or validated itself; this
+      // arrives from a browser extension, so it is checked like any input.
+      if (!isValidAddress(address)) {
+        setStatus('That wallet did not return a Stellar address (G…).', 'error')
+        return
+      }
       state.walletAddress = address
       renderWalletState(state)
       if (!$('address').value.trim()) $('address').value = address

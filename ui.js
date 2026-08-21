@@ -15,6 +15,17 @@ const setStatus = (message, kind = 'info') => {
 
 const short = (value) => `${value.slice(0, 6)}…${value.slice(-6)}`
 
+const ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
+
+/**
+ * Escapes a value for interpolation into markup. Every string the page renders
+ * is one it validated — a G-address, an asset code checked against the contract
+ * it derives — so this is not what makes the page safe. It is what keeps a
+ * later edit, or a new field off the token API, from being able to change that.
+ * Numbers the page computed and its own enum labels are interpolated directly.
+ */
+const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ENTITIES[c])
+
 /**
  * Names the list and where it came from. The source matters: the published
  * snapshot can lag the live list, so a partner reading "tokens.json" knows why
@@ -42,8 +53,8 @@ const STATUS_LABEL = {
 function selectCell(row, selected) {
   if (row.status !== 'missing') return '<td></td>'
   const checked = selected.has(row.contract) ? ' checked' : ''
-  return `<td><input type="checkbox" data-contract="${row.contract}"
-    aria-label="Create trustline for ${row.code}"${checked} /></td>`
+  return `<td><input type="checkbox" data-contract="${escapeHtml(row.contract)}"
+    aria-label="Create trustline for ${escapeHtml(row.code)}"${checked} /></td>`
 }
 
 function renderTable(state) {
@@ -56,8 +67,8 @@ function renderTable(state) {
       (row) => `
       <tr>
         ${selectCell(row, state.selected)}
-        <td><strong>${row.code}</strong></td>
-        <td class="mono">${short(row.issuer)}</td>
+        <td><strong>${escapeHtml(row.code)}</strong></td>
+        <td class="mono">${escapeHtml(short(row.issuer))}</td>
         <td><span class="pill ${row.status}">${STATUS_LABEL[row.status]}</span></td>
         <td>${row.authRequired ? '<span class="pill gated">Issuer authorization</span>' : ''}</td>
       </tr>`
@@ -112,7 +123,7 @@ function renderSummary(state) {
   if (state.walletAddress && state.walletAddress !== state.address) {
     notes.push(
       `<p class="warn">The connected wallet
-       (<span class="mono">${short(state.walletAddress)}</span>) is not this
+       (<span class="mono">${escapeHtml(short(state.walletAddress))}</span>) is not this
        account. That is fine if it is a signer on it — otherwise the wallet
        will refuse to sign.</p>`
     )
@@ -121,14 +132,15 @@ function renderSummary(state) {
   if (unauthorized.length > 0) {
     notes.push(
       `<p class="warn">${unauthorized.length} trustline(s) exist but are not
-       authorized by the issuer: ${unauthorized.map((r) => r.code).join(', ')}.
+       authorized by the issuer:
+       ${unauthorized.map((r) => escapeHtml(r.code)).join(', ')}.
        Transfers will still fail until the issuer approves them.</p>`
     )
   }
 
   $('summary').innerHTML = `
     <dl>
-      <div><dt>Account</dt><dd class="mono">${state.address}</dd></div>
+      <div><dt>Account</dt><dd class="mono">${escapeHtml(state.address)}</dd></div>
       <div><dt>Balance</dt><dd>${state.account.balance.toFixed(2)} XLM</dd></div>
       <div><dt>Available</dt><dd>${state.account.available.toFixed(2)} XLM</dd></div>
       <div><dt>Missing trustlines</dt><dd>${missing.length} of ${state.rows.length}</dd></div>
@@ -155,9 +167,8 @@ function renderSummary(state) {
 function renderWalletState(state) {
   const connected = Boolean(state.walletAddress)
   $('connect').textContent = connected ? 'Disconnect' : 'Connect wallet'
-  const badge = $('wallet-status')
-  badge.hidden = !connected
-  badge.innerHTML = connected
-    ? `Signing with <span class="mono">${short(state.walletAddress)}</span>`
-    : ''
+  $('wallet-status').hidden = !connected
+  // The badge's markup is in the page, so the address is set as text: the only
+  // string here that the page did not derive itself needs no escaping at all.
+  $('wallet-address').textContent = connected ? short(state.walletAddress) : ''
 }
