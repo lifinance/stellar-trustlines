@@ -26,6 +26,17 @@ const STROOPS_PER_XLM = 10_000_000
 /** `AUTHORIZED_FLAG` on `TrustLineEntry.flags`. */
 const TRUSTLINE_AUTHORIZED = 1
 
+/**
+ * How often to ask whether a submitted transaction has landed. Mainnet closes a
+ * ledger roughly every five seconds and `getTransaction` answers `NOT_FOUND`
+ * until the transaction is in a closed one, so asking more often than that only
+ * spends requests: the answer cannot have changed in between.
+ */
+const POLL_INTERVAL_MS = 5000
+
+/** How long to keep asking before giving up on an answer. */
+const POLL_TIMEOUT_MS = 30_000
+
 const {
   xdr,
   Asset,
@@ -296,8 +307,9 @@ async function submitTransaction(signedXdr) {
     throw new Error(`${code}. ${EXPLANATIONS[code] ?? ''}`.trim())
   }
 
-  for (let attempt = 0; attempt < 30; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 1000))
+  const attempts = Math.ceil(POLL_TIMEOUT_MS / POLL_INTERVAL_MS)
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
     const result = await rpc('getTransaction', { hash: sent.hash })
     if (result.status === 'SUCCESS') return sent.hash
     if (result.status === 'FAILED') {
