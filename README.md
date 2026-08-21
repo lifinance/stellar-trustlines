@@ -59,6 +59,14 @@ everything else — see `tokens.js`. Tokens with no trustline concept (native XL
 non-SAC Soroban tokens) and tokens with no price are left out, matching how
 `tokens.json` is generated.
 
+It only has to read a contract the snapshot does not already carry, so a list
+unchanged since the last export costs no RPC at all. A cached pair is not taken
+on faith: a SAC's address is a hash of its code, issuer and network, so the page
+re-derives that address locally and drops any pair that does not produce the
+contract it is filed under — the same check the on-chain read gets, for no
+request. This keeps the page working when RPC is rate-limited, and it is why
+`tokens.json` being out of date can only ever cost freshness, never accuracy.
+
 ## For anyone scripting against this
 
 `tokens.json` is a published snapshot of that list, and is safe to consume
