@@ -1,6 +1,6 @@
 /**
  * Bundle entry. Produces `vendor/bundle.min.js`, which exposes:
- *   window.StellarSdk   — the Stellar SDK, used directly by app.js
+ *   window.StellarSdk   — the Stellar SDK, used directly by stellar.js
  *   window.LifiWallets  — the Wallets Kit plus the wallet modules we enable
  *
  * The SDK is bundled rather than kept external: an external import compiles to

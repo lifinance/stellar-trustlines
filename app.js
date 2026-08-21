@@ -7,30 +7,10 @@
  * wallet, and the unsigned XDR is always offered so the transaction can be
  * reviewed or signed elsewhere.
  *
- * Reads and submits over Soroban RPC. Horizon is deprecated, and RPC can serve
- * both jobs here: the manifest names every asset up front, so the trustline
- * ledger keys can be built directly rather than enumerated.
+ * This file holds the page's state and the actions the buttons trigger. The
+ * network and transaction work lives in `stellar.js`, the rendering in `ui.js`;
+ * both are loaded before this one.
  */
-
-const RPC_URL = 'https://mainnet.sorobanrpc.com'
-const NETWORK_PASSPHRASE = StellarSdk.Networks.PUBLIC
-
-/** Reserve locked per subentry, in XLM. A trustline is one subentry. */
-const BASE_RESERVE = 0.5
-
-/** Protocol cap on operations in a single transaction. */
-const MAX_OPS_PER_TX = 100
-
-/** Per-operation fee bid, in stroops. Well above base to survive surge. */
-const FEE_PER_OP = '10000'
-
-const STROOPS_PER_XLM = 10_000_000
-
-/** `AUTHORIZED_FLAG` on `TrustLineEntry.flags`. */
-const TRUSTLINE_AUTHORIZED = 1
-
-const { xdr, Asset, Account, Keypair, StrKey, TransactionBuilder, Operation } =
-  StellarSdk
 
 /** Everything the page has loaded or derived. */
 const state = {
@@ -44,395 +24,132 @@ const state = {
   batches: [],
 }
 
-// ---------------------------------------------------------------- RPC
-
-async function rpc(method, params) {
-  const response = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-  })
-  if (!response.ok) throw new Error(`RPC ${method}: HTTP ${response.status}`)
-  const body = await response.json()
-  if (body.error) throw new Error(`RPC ${method}: ${body.error.message}`)
-  return body.result
-}
-
-const accountLedgerKey = (address) =>
-  xdr.LedgerKey.account(
-    new xdr.LedgerKeyAccount({
-      accountId: Keypair.fromPublicKey(address).xdrAccountId(),
-    })
-  ).toXDR('base64')
-
-const trustlineLedgerKey = (address, code, issuer) =>
-  xdr.LedgerKey.trustline(
-    new xdr.LedgerKeyTrustLine({
-      accountId: Keypair.fromPublicKey(address).xdrAccountId(),
-      asset: new Asset(code, issuer).toTrustLineXDRObject(),
-    })
-  ).toXDR('base64')
-
-/**
- * Reads ledger entries in chunks, keyed by the request key. The RPC omits keys
- * that do not resolve and does not guarantee ordering, so absence is meaningful
- * and every lookup goes through the key.
- */
-async function readLedgerEntries(keys) {
-  const found = new Map()
-  for (let i = 0; i < keys.length; i += MAX_OPS_PER_TX) {
-    const result = await rpc('getLedgerEntries', {
-      keys: keys.slice(i, i + MAX_OPS_PER_TX),
-    })
-    for (const entry of result.entries ?? []) {
-      found.set(entry.key, xdr.LedgerEntryData.fromXDR(entry.xdr, 'base64'))
-    }
-  }
-  return found
-}
-
-/**
- * Pulls the sponsorship counts and selling liabilities off the `AccountEntry`
- * extension chain. Both feed the reserve calculation: sponsored subentries are
- * paid for by someone else, and liabilities are already spoken for.
- */
-function readAccountExtensions(account) {
-  const extensions = { numSponsoring: 0, numSponsored: 0, sellingLiabilities: 0 }
-  const ext = account.ext()
-  if (ext.switch() !== 1) return extensions
-
-  const v1 = ext.v1()
-  extensions.sellingLiabilities = Number(v1.liabilities().selling().toString())
-
-  const v1Ext = v1.ext()
-  if (v1Ext.switch() === 2) {
-    const v2 = v1Ext.v2()
-    extensions.numSponsoring = v2.numSponsoring()
-    extensions.numSponsored = v2.numSponsored()
-  }
-  return extensions
-}
-
-/**
- * Reads the collector account plus a trustline entry for every manifest asset,
- * in one round-trip. A trustline that exists but is unauthorized is reported
- * separately: creating it was not enough, and a transfer to it still fails.
- */
-async function readAccount(address, assets) {
-  const accountKey = accountLedgerKey(address)
-  const assetKeys = new Map(
-    assets.map((asset) => [
-      trustlineLedgerKey(address, asset.code, asset.issuer),
-      asset,
-    ])
-  )
-  const entries = await readLedgerEntries([accountKey, ...assetKeys.keys()])
-
-  const accountData = entries.get(accountKey)
-  if (accountData === undefined) return { exists: false }
-
-  const account = accountData.account()
-  const thresholds = account.thresholds()
-  const extensions = readAccountExtensions(account)
-
-  const trustlines = new Map()
-  for (const [key, asset] of assetKeys) {
-    const data = entries.get(key)
-    if (data === undefined) continue
-    trustlines.set(asset.contract, {
-      authorized: (data.trustLine().flags() & TRUSTLINE_AUTHORIZED) !== 0,
-    })
-  }
-
-  const subEntries = account.numSubEntries()
-  const minimumBalance =
-    (2 + subEntries + extensions.numSponsoring - extensions.numSponsored) *
-    BASE_RESERVE
-  const balance = Number(account.balance().toString()) / STROOPS_PER_XLM
-
-  return {
-    exists: true,
-    sequence: account.seqNum().toString(),
-    balance,
-    available:
-      balance - minimumBalance - extensions.sellingLiabilities / STROOPS_PER_XLM,
-    masterWeight: thresholds[0],
-    // ChangeTrust is a medium-threshold operation.
-    mediumThreshold: thresholds[2],
-    trustlines,
-  }
-}
-
-// ------------------------------------------------------------- Diffing
-
-/**
- * Classifies every manifest asset against the account. `unauthorized` is the
- * case worth surfacing loudly: the trustline is visibly present, so nothing
- * looks wrong, but the issuer has not authorized it and transfers still fail.
- */
-function buildRows() {
-  return state.manifest.assets.map((asset) => {
-    const trustline = state.account.trustlines.get(asset.contract)
-    const status =
-      trustline === undefined
-        ? 'missing'
-        : trustline.authorized
-          ? 'present'
-          : 'unauthorized'
-    return { ...asset, status }
-  })
-}
-
-const missingRows = () => state.rows.filter((row) => row.status === 'missing')
-
-/**
- * The rows that will actually be created. Everything missing is selected by
- * default — the common case is "set this account up" — but a partner can
- * narrow it to the assets they expect to receive.
- */
-const selectedRows = () =>
-  missingRows().filter((row) => state.selected.has(row.contract))
+const missing = () => missingRows(state.rows)
+const selected = () => selectedRows(state.rows, state.selected)
 
 /** Resets the selection to everything missing, after a load or a submission. */
 const selectAllMissing = () => {
-  state.selected = new Set(missingRows().map((row) => row.contract))
+  state.selected = new Set(missing().map((row) => row.contract))
 }
 
-/**
- * Splits the missing assets into transactions. Each is built against the same
- * starting sequence number, so they must be submitted in order, and the account
- * is re-read between submissions rather than pre-chaining the whole set — one
- * failure part-way through would otherwise invalidate every later transaction.
- */
-function buildBatches(rows) {
-  const batches = []
-  for (let i = 0; i < rows.length; i += MAX_OPS_PER_TX) {
-    batches.push(rows.slice(i, i + MAX_OPS_PER_TX))
+function render() {
+  state.batches = buildBatches(selected())
+  renderSummary(state)
+  renderTable(state)
+  $('results').hidden = false
+}
+
+// --------------------------------------------------------------- Actions
+
+async function load(address) {
+  if (!isValidAddress(address)) {
+    setStatus('That is not a valid Stellar account address (G…).', 'error')
+    return
   }
-  return batches
-}
-
-/**
- * Builds one unsigned transaction. The `changeTrust` limit is left at the SDK
- * default of int64 max, matching the unlimited trustline that the SAC's CAP-73
- * `trust()` would have opened.
- */
-function buildTransaction(batch, sequence) {
-  const builder = new TransactionBuilder(new Account(state.address, sequence), {
-    fee: FEE_PER_OP,
-    networkPassphrase: NETWORK_PASSPHRASE,
-  })
-  for (const asset of batch) {
-    builder.addOperation(
-      Operation.changeTrust({ asset: new Asset(asset.code, asset.issuer) })
-    )
-  }
-  return builder.setTimeout(600).build()
-}
-
-// ------------------------------------------------------------- Wallets
-
-/**
- * Wallet access goes through Stellar Wallets Kit, which covers the injected
- * extensions plus Ledger over WebUSB. Ledger therefore needs a secure context:
- * it works over https and on localhost, but not from a `file://` page.
- *
- * The kit's API is entirely static — `init` once, then call through the class.
- */
-function initWallets() {
-  const { StellarWalletsKit, modules } = window.LifiWallets
-  StellarWalletsKit.init({
-    network: NETWORK_PASSPHRASE,
-    modules: modules.map((Module) => new Module()),
-  })
-  return StellarWalletsKit
-}
-
-/** Opens the kit's wallet picker and returns the address the user selected. */
-async function connectWallet() {
-  const { address } = await state.kit.authModal()
-  return address
-}
-
-/**
- * Signs with the connected wallet. `address` is passed through so the wallet
- * signs with the account being set up rather than whatever it last selected.
- */
-async function signTransaction(txXdr, address) {
-  const { signedTxXdr } = await state.kit.signTransaction(txXdr, {
-    networkPassphrase: NETWORK_PASSPHRASE,
-    address,
-  })
-  return signedTxXdr
-}
-
-// ---------------------------------------------------------- Submission
-
-/** Turns a transaction result XDR into its result code, e.g. `txBadAuth`. */
-function describeResult(errorResultXdr) {
+  setStatus('Reading account…')
   try {
-    return xdr.TransactionResult.fromXDR(errorResultXdr, 'base64')
-      .result()
-      .switch().name
-  } catch {
-    return 'unknown error'
-  }
-}
-
-const EXPLANATIONS = {
-  txBadAuth: 'Not enough signatures — this account needs more than one signer.',
-  txInsufficientBalance:
-    'Not enough XLM to cover the reserve for these trustlines.',
-  txBadSeq: 'Sequence number is stale — reload and try again.',
-  txFailed: 'An operation failed; the most likely cause is an unfunded reserve.',
-}
-
-/** Submits a signed transaction and polls until the network reports an outcome. */
-async function submitTransaction(signedXdr) {
-  const sent = await rpc('sendTransaction', { transaction: signedXdr })
-  if (sent.status === 'ERROR') {
-    const code = describeResult(sent.errorResultXdr)
-    throw new Error(`${code}. ${EXPLANATIONS[code] ?? ''}`.trim())
-  }
-
-  for (let attempt = 0; attempt < 30; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 1000))
-    const result = await rpc('getTransaction', { hash: sent.hash })
-    if (result.status === 'SUCCESS') return sent.hash
-    if (result.status === 'FAILED') {
-      const code = describeResult(result.resultXdr)
-      throw new Error(`${code}. ${EXPLANATIONS[code] ?? ''}`.trim())
+    const account = await readAccount(address, state.manifest.assets)
+    if (!account.exists) {
+      setStatus(
+        'That account does not exist on mainnet yet — it needs to be funded first.',
+        'error'
+      )
+      return
     }
+    state.address = address
+    state.account = account
+    state.rows = buildRows(state.manifest.assets, account)
+    selectAllMissing()
+    render()
+    setStatus('')
+  } catch (error) {
+    setStatus(error.message, 'error')
   }
-  throw new Error(`Timed out waiting for ${sent.hash}`)
 }
 
-// ------------------------------------------------------------- Rendering
-
-const $ = (id) => document.getElementById(id)
-
-const setStatus = (message, kind = 'info') => {
-  const el = $('status')
-  el.textContent = message
-  el.className = `status ${kind}`
-  el.hidden = !message
-}
-
-const short = (value) => `${value.slice(0, 6)}…${value.slice(-6)}`
-
-const STATUS_LABEL = {
-  missing: 'Missing',
-  present: 'Ready',
-  unauthorized: 'Needs issuer approval',
-}
-
-/** A checkbox for a missing row; a dash for one that is already established. */
-function selectCell(row) {
-  if (row.status !== 'missing') return '<td></td>'
-  const checked = state.selected.has(row.contract) ? ' checked' : ''
-  return `<td><input type="checkbox" data-contract="${row.contract}"
-    aria-label="Create trustline for ${row.code}"${checked} /></td>`
-}
-
-function renderTable() {
-  const missing = missingRows()
-  const allChecked =
-    missing.length > 0 && selectedRows().length === missing.length
-  const rows = state.rows
-    .map(
-      (row) => `
-      <tr>
-        ${selectCell(row)}
-        <td><strong>${row.code}</strong></td>
-        <td class="mono">${short(row.issuer)}</td>
-        <td><span class="pill ${row.status}">${STATUS_LABEL[row.status]}</span></td>
-        <td>${row.authRequired ? '<span class="pill gated">Issuer authorization</span>' : ''}</td>
-      </tr>`
-    )
-    .join('')
-  $('assets').innerHTML = `
-    <table>
-      <thead>
-        <tr>
-          <th>${missing.length > 0 ? `<input type="checkbox" id="select-all" aria-label="Select all missing" ${allChecked ? 'checked' : ''} />` : ''}</th>
-          <th>Asset</th><th>Issuer</th><th>Trustline</th><th>Notes</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>`
+/** Rebuilds every pending transaction and hands back their unsigned XDRs. */
+function unsignedXdrs() {
+  return state.batches.map((batch) =>
+    buildTransaction(state.address, batch, state.account.sequence).toXDR()
+  )
 }
 
 /**
- * Renders the summary and decides which actions to offer. A multisig account
- * cannot complete the signing flow in the page, so it is routed to the XDR
- * before it signs anything rather than after a confusing `txBadAuth`.
+ * Signs and submits each batch in turn, re-reading the account between them so
+ * the next transaction picks up the sequence number the network actually has.
  */
-function renderSummary() {
-  const missing = missingRows()
-  const selected = selectedRows()
-  const cost = selected.length * BASE_RESERVE
-  const underfunded = state.account.available < cost
-  const multisig = state.account.mediumThreshold > state.account.masterWeight
+async function signAndSubmit() {
+  if (!state.walletAddress) {
+    setStatus('Connect a wallet first.', 'error')
+    return
+  }
+  if (selected().length === 0) {
+    setStatus('Select at least one asset.', 'error')
+    return
+  }
+  $('sign').disabled = true
+  try {
+    for (let i = 0; i < state.batches.length; i++) {
+      setStatus(`Transaction ${i + 1} of ${state.batches.length}: awaiting signature…`)
+      const tx = buildTransaction(
+        state.address,
+        state.batches[i],
+        state.account.sequence
+      )
+      const signed = await signTransaction(state.kit, tx.toXDR(), state.address)
 
-  const notes = []
-  if (missing.length === 0) {
-    notes.push(
-      '<p class="ok">Every asset in the manifest already has a trustline.</p>'
-    )
-  }
-  if (underfunded && selected.length > 0) {
-    notes.push(
-      `<p class="warn">Not enough XLM: ${selected.length} trustlines lock
-       <strong>${cost} XLM</strong> but only
-       <strong>${state.account.available.toFixed(2)} XLM</strong> is available.
-       Fund the account before continuing.</p>`
-    )
-  }
-  if (multisig) {
-    notes.push(
-      `<p class="warn">This account needs more than one signature
-       (medium threshold ${state.account.mediumThreshold}, master key weight
-       ${state.account.masterWeight}). Signing in this page will not be enough —
-       download the XDR and sign it through your usual process.</p>`
-    )
-  }
-  if (state.walletAddress && state.walletAddress !== state.address) {
-    notes.push(
-      `<p class="warn">The connected wallet
-       (<span class="mono">${short(state.walletAddress)}</span>) is not this
-       account. That is fine if it is a signer on it — otherwise the wallet
-       will refuse to sign.</p>`
-    )
-  }
-  const unauthorized = state.rows.filter((r) => r.status === 'unauthorized')
-  if (unauthorized.length > 0) {
-    notes.push(
-      `<p class="warn">${unauthorized.length} trustline(s) exist but are not
-       authorized by the issuer: ${unauthorized.map((r) => r.code).join(', ')}.
-       Transfers will still fail until the issuer approves them.</p>`
-    )
-  }
+      setStatus(`Transaction ${i + 1} of ${state.batches.length}: submitting…`)
+      const hash = await submitTransaction(signed)
+      setStatus(`Transaction ${i + 1} confirmed (${short(hash)}). Re-reading account…`)
 
-  $('summary').innerHTML = `
-    <dl>
-      <div><dt>Account</dt><dd class="mono">${state.address}</dd></div>
-      <div><dt>Balance</dt><dd>${state.account.balance.toFixed(2)} XLM</dd></div>
-      <div><dt>Available</dt><dd>${state.account.available.toFixed(2)} XLM</dd></div>
-      <div><dt>Missing trustlines</dt><dd>${missing.length} of ${state.rows.length}</dd></div>
-      <div><dt>Selected</dt><dd>${selected.length}</dd></div>
-      <div><dt>Reserve needed</dt><dd>${cost} XLM</dd></div>
-    </dl>
-    ${notes.join('')}`
+      state.account = await readAccount(state.address, state.manifest.assets)
+      state.rows = buildRows(state.manifest.assets, state.account)
+      // The selection is deliberately left alone: `selectedRows` intersects it
+      // with what is still missing, so created assets drop out on their own
+      // and anything the partner unchecked stays unchecked.
+      render()
+    }
+    setStatus('Selected trustlines created.', 'ok')
+  } catch (error) {
+    setStatus(error.message, 'error')
+  } finally {
+    $('sign').disabled = false
+  }
+}
 
-  const canSign = selected.length > 0 && !underfunded && !multisig
-  $('actions').hidden = missing.length === 0
-  $('sign').hidden = !canSign
-  $('copy').disabled = selected.length === 0
-  $('download').disabled = selected.length === 0
-  $('sign').textContent =
-    state.batches.length > 1
-      ? `Create ${selected.length} trustlines (${state.batches.length} transactions)`
-      : `Create ${selected.length} trustline${selected.length === 1 ? '' : 's'}`
+/** Drops the connection but keeps the loaded account, so the diff stays put. */
+async function dropWallet() {
+  await disconnectWallet(state.kit)
+  state.walletAddress = null
+  renderWalletState(state)
+  if (state.account) render()
+}
+
+// --------------------------------------------------------------- Wiring
+
+/**
+ * The kit renders its own wallet picker, so the page only needs one button.
+ * Connecting fills the address field but does not lock it: a signer key is
+ * often not the collector account itself.
+ */
+function wireConnect() {
+  $('connect').addEventListener('click', async () => {
+    if (state.walletAddress) {
+      await dropWallet()
+      return
+    }
+    try {
+      const address = await connectWallet(state.kit)
+      state.walletAddress = address
+      renderWalletState(state)
+      if (!$('address').value.trim()) $('address').value = address
+      await load($('address').value.trim())
+    } catch (error) {
+      // The kit throws `{code, message}` when the user dismisses the modal.
+      setStatus(error.message ?? 'Wallet connection cancelled.', 'error')
+    }
+  })
+  renderWalletState(state)
 }
 
 /**
@@ -453,138 +170,24 @@ function wireSelection() {
   })
 }
 
-function render() {
-  state.batches = buildBatches(selectedRows())
-  renderSummary()
-  renderTable()
-  $('results').hidden = false
-}
-
-// --------------------------------------------------------------- Actions
-
-async function load(address) {
-  if (!StrKey.isValidEd25519PublicKey(address)) {
-    setStatus('That is not a valid Stellar account address (G…).', 'error')
-    return
-  }
-  setStatus('Reading account…')
-  try {
-    const account = await readAccount(address, state.manifest.assets)
-    if (!account.exists) {
-      setStatus(
-        'That account does not exist on mainnet yet — it needs to be funded first.',
-        'error'
-      )
-      return
-    }
-    state.address = address
-    state.account = account
-    state.rows = buildRows()
-    selectAllMissing()
-    render()
-    setStatus('')
-  } catch (error) {
-    setStatus(error.message, 'error')
-  }
-}
-
-/** Rebuilds every pending transaction and hands back their unsigned XDRs. */
-function unsignedXdrs() {
-  return state.batches.map((batch) =>
-    buildTransaction(batch, state.account.sequence).toXDR()
-  )
-}
-
-/**
- * Signs and submits each batch in turn, re-reading the account between them so
- * the next transaction picks up the sequence number the network actually has.
- */
-async function signAndSubmit() {
-  if (!state.walletAddress) {
-    setStatus('Connect a wallet first.', 'error')
-    return
-  }
-  if (selectedRows().length === 0) {
-    setStatus('Select at least one asset.', 'error')
-    return
-  }
-  $('sign').disabled = true
-  try {
-    for (let i = 0; i < state.batches.length; i++) {
-      setStatus(`Transaction ${i + 1} of ${state.batches.length}: awaiting signature…`)
-      const tx = buildTransaction(state.batches[i], state.account.sequence)
-      const signed = await signTransaction(tx.toXDR(), state.address)
-
-      setStatus(`Transaction ${i + 1} of ${state.batches.length}: submitting…`)
-      const hash = await submitTransaction(signed)
-      setStatus(`Transaction ${i + 1} confirmed (${short(hash)}). Re-reading account…`)
-
-      state.account = await readAccount(state.address, state.manifest.assets)
-      state.rows = buildRows()
-      // The selection is deliberately left alone: `selectedRows` intersects it
-      // with what is still missing, so created assets drop out on their own
-      // and anything the partner unchecked stays unchecked.
-      state.batches = buildBatches(selectedRows())
-      render()
-    }
-    setStatus('Selected trustlines created.', 'ok')
-  } catch (error) {
-    setStatus(error.message, 'error')
-  } finally {
-    $('sign').disabled = false
-  }
-}
-
-/**
- * The kit renders its own wallet picker, so the page only needs one button.
- * Connecting fills the address field but does not lock it: a signer key is
- * often not the collector account itself.
- */
-function wireConnect() {
-  $('connect').addEventListener('click', async () => {
-    if (state.walletAddress) {
-      await disconnectWallet()
-      return
-    }
-    try {
-      const address = await connectWallet()
-      state.walletAddress = address
-      renderWalletState()
-      if (!$('address').value.trim()) $('address').value = address
-      await load($('address').value.trim())
-    } catch (error) {
-      // The kit throws `{code, message}` when the user dismisses the modal.
-      setStatus(error.message ?? 'Wallet connection cancelled.', 'error')
-    }
+function wireActions() {
+  $('load').addEventListener('click', () => load($('address').value.trim()))
+  $('address').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') load($('address').value.trim())
   })
-  renderWalletState()
-}
-
-/** Drops the connection but keeps the loaded account, so the diff stays put. */
-async function disconnectWallet() {
-  try {
-    await state.kit.disconnect()
-  } catch {
-    // Whether the wallet acknowledges the disconnect or not, the page has to
-    // stop claiming a connection — the local state is what the UI acts on.
-  }
-  state.walletAddress = null
-  renderWalletState()
-  if (state.account) render()
-}
-
-/**
- * Reflects the connection in the button and the address beside it. Without
- * this the button reads "Connect wallet" whether or not one is connected.
- */
-function renderWalletState() {
-  const connected = Boolean(state.walletAddress)
-  $('connect').textContent = connected ? 'Disconnect' : 'Connect wallet'
-  const badge = $('wallet-status')
-  badge.hidden = !connected
-  badge.innerHTML = connected
-    ? `Signing with <span class="mono">${short(state.walletAddress)}</span>`
-    : ''
+  $('sign').addEventListener('click', signAndSubmit)
+  $('copy').addEventListener('click', async () => {
+    await navigator.clipboard.writeText(unsignedXdrs().join('\n'))
+    setStatus('Unsigned XDR copied.', 'ok')
+  })
+  $('download').addEventListener('click', () => {
+    const blob = new Blob([unsignedXdrs().join('\n')], { type: 'text/plain' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = `trustlines-${state.address.slice(0, 8)}.xdr.txt`
+    link.click()
+    URL.revokeObjectURL(link.href)
+  })
 }
 
 // ----------------------------------------------------------------- Boot
@@ -603,30 +206,12 @@ async function main() {
     setStatus(`Manifest is for ${state.manifest.network}, not mainnet.`, 'error')
     return
   }
-  $('manifest-meta').textContent =
-    `${state.manifest.assets.length} assets · generated ${state.manifest.generatedAt.slice(0, 10)}`
+  renderManifestMeta(state.manifest)
 
   state.kit = initWallets()
   wireConnect()
   wireSelection()
-
-  $('load').addEventListener('click', () => load($('address').value.trim()))
-  $('address').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') load($('address').value.trim())
-  })
-  $('sign').addEventListener('click', signAndSubmit)
-  $('copy').addEventListener('click', async () => {
-    await navigator.clipboard.writeText(unsignedXdrs().join('\n'))
-    setStatus('Unsigned XDR copied.', 'ok')
-  })
-  $('download').addEventListener('click', () => {
-    const blob = new Blob([unsignedXdrs().join('\n')], { type: 'text/plain' })
-    const link = document.createElement('a')
-    link.href = URL.createObjectURL(blob)
-    link.download = `trustlines-${state.address.slice(0, 8)}.xdr.txt`
-    link.click()
-    URL.revokeObjectURL(link.href)
-  })
+  wireActions()
 
   const preset = new URLSearchParams(location.search).get('address')
   if (preset) {

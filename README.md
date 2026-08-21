@@ -92,14 +92,16 @@ python3 -m http.server 8000
 | File | |
 | --- | --- |
 | `index.html` | the page: markup and styles |
-| `app.js` | all logic — RPC reads, diffing, transaction building, signing |
+| `stellar.js` | RPC reads, diffing, transaction building, wallets, submission |
+| `ui.js` | rendering: the asset table, the summary, status messages |
+| `app.js` | the page's state, the actions its buttons trigger, and boot |
 | `tokens.json` | the manifest, generated upstream |
 | `vendor/bundle.min.js` | built dependencies: Stellar SDK + Stellar Wallets Kit |
 | `build/` | the bundle's inputs, so it can be rebuilt and diffed |
 
-Nothing is fetched from a CDN. `app.js` is plain, readable source; only the
-third-party dependencies are bundled, and `build/` is there so you can
-reproduce `vendor/bundle.min.js` yourself:
+Nothing is fetched from a CDN. The three page scripts are plain, readable
+source, loaded in that order; only the third-party dependencies are bundled, and
+`build/` is there so you can reproduce `vendor/bundle.min.js` yourself:
 
 ```bash
 cd build && npm install && npm run build
@@ -118,8 +120,9 @@ You are being asked to sign transactions from a web page, which is the shape of
 a phishing attack. Reasonable precautions:
 
 - **Check the domain.** Only the URL above is ours.
-- **Read the source.** All page logic is in `app.js`; dependencies are bundled
-  from the pinned inputs in `build/`, with nothing loaded from a CDN.
+- **Read the source.** All page logic is in `stellar.js`, `ui.js` and `app.js`;
+  dependencies are bundled from the pinned inputs in `build/`, with nothing
+  loaded from a CDN.
 - **Verify the transaction.** Every operation is listed before you sign, and the
   unsigned XDR is always available if you would rather inspect it in
   [Stellar Lab](https://lab.stellar.org).
