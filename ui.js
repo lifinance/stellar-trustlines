@@ -1,0 +1,174 @@
+/**
+ * Everything that writes to the page. Each renderer is handed the page state
+ * and derives what it shows from it, so a render is always a function of the
+ * state rather than of whatever happened last.
+ */
+
+const $ = (id) => document.getElementById(id)
+
+const setStatus = (message, kind = 'info') => {
+  const el = $('status')
+  el.textContent = message
+  el.className = `status ${kind}`
+  el.hidden = !message
+}
+
+const short = (value) => `${value.slice(0, 6)}…${value.slice(-6)}`
+
+const ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
+
+/**
+ * Escapes a value for interpolation into markup. Every string the page renders
+ * is one it validated — a G-address, an asset code checked against the contract
+ * it derives — so this is not what makes the page safe. It is what keeps a
+ * later edit, or a new field off the token API, from being able to change that.
+ * Numbers the page computed and its own enum labels are interpolated directly.
+ */
+const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ENTITIES[c])
+
+/**
+ * Names the list and where it came from. The source matters: the published
+ * snapshot can lag the live list, so a partner reading "tokens.json" knows why
+ * an asset they expect might be absent.
+ */
+const renderManifestMeta = (manifest) => {
+  const skipped = Object.values(manifest.skipped ?? {}).reduce((a, b) => a + b, 0)
+  const parts = [
+    `${manifest.assets.length} assets`,
+    manifest.source === 'api'
+      ? 'live from the LI.FI API'
+      : `from tokens.json, generated ${manifest.generatedAt.slice(0, 10)}`,
+  ]
+  if (skipped > 0) parts.push(`${skipped} token(s) skipped — see the console`)
+  $('manifest-meta').textContent = parts.join(' · ')
+}
+
+const STATUS_LABEL = {
+  missing: 'Missing',
+  present: 'Ready',
+  unauthorized: 'Needs issuer approval',
+}
+
+/** A checkbox for a missing row; a dash for one that is already established. */
+function selectCell(row, selected) {
+  if (row.status !== 'missing') return '<td></td>'
+  const checked = selected.has(row.contract) ? ' checked' : ''
+  return `<td><input type="checkbox" data-contract="${escapeHtml(row.contract)}"
+    aria-label="Create trustline for ${escapeHtml(row.code)}"${checked} /></td>`
+}
+
+function renderTable(state) {
+  const missing = missingRows(state.rows)
+  const allChecked =
+    missing.length > 0 &&
+    selectedRows(state.rows, state.selected).length === missing.length
+  const rows = state.rows
+    .map(
+      (row) => `
+      <tr>
+        ${selectCell(row, state.selected)}
+        <td><strong>${escapeHtml(row.code)}</strong></td>
+        <td class="mono">${escapeHtml(short(row.issuer))}</td>
+        <td><span class="pill ${row.status}">${STATUS_LABEL[row.status]}</span></td>
+        <td>${row.authRequired ? '<span class="pill gated">Issuer authorization</span>' : ''}</td>
+      </tr>`
+    )
+    .join('')
+  $('assets').innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>${missing.length > 0 ? `<input type="checkbox" id="select-all" aria-label="Select all missing" ${allChecked ? 'checked' : ''} />` : ''}</th>
+          <th>Asset</th><th>Issuer</th><th>Trustline</th><th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`
+}
+
+/**
+ * Renders the summary and decides which actions to offer. A multisig account
+ * cannot complete the signing flow in the page, so it is routed to the XDR
+ * before it signs anything rather than after a confusing `txBadAuth`.
+ */
+function renderSummary(state) {
+  const missing = missingRows(state.rows)
+  const selected = selectedRows(state.rows, state.selected)
+  const cost = selected.length * BASE_RESERVE
+  const underfunded = state.account.available < cost
+  const multisig = state.account.mediumThreshold > state.account.masterWeight
+
+  const notes = []
+  if (missing.length === 0) {
+    notes.push(
+      '<p class="ok">Every asset in the manifest already has a trustline.</p>'
+    )
+  }
+  if (underfunded && selected.length > 0) {
+    notes.push(
+      `<p class="warn">Not enough XLM: ${selected.length} trustlines lock
+       <strong>${cost} XLM</strong> but only
+       <strong>${state.account.available.toFixed(2)} XLM</strong> is available.
+       Fund the account before continuing.</p>`
+    )
+  }
+  if (multisig) {
+    notes.push(
+      `<p class="warn">This account needs more than one signature
+       (medium threshold ${state.account.mediumThreshold}, master key weight
+       ${state.account.masterWeight}). Signing in this page will not be enough —
+       download the XDR and sign it through your usual process.</p>`
+    )
+  }
+  if (state.walletAddress && state.walletAddress !== state.address) {
+    notes.push(
+      `<p class="warn">The connected wallet
+       (<span class="mono">${escapeHtml(short(state.walletAddress))}</span>) is not this
+       account. That is fine if it is a signer on it — otherwise the wallet
+       will refuse to sign.</p>`
+    )
+  }
+  const unauthorized = state.rows.filter((r) => r.status === 'unauthorized')
+  if (unauthorized.length > 0) {
+    notes.push(
+      `<p class="warn">${unauthorized.length} trustline(s) exist but are not
+       authorized by the issuer:
+       ${unauthorized.map((r) => escapeHtml(r.code)).join(', ')}.
+       Transfers will still fail until the issuer approves them.</p>`
+    )
+  }
+
+  $('summary').innerHTML = `
+    <dl>
+      <div><dt>Account</dt><dd class="mono">${escapeHtml(state.address)}</dd></div>
+      <div><dt>Balance</dt><dd>${state.account.balance.toFixed(2)} XLM</dd></div>
+      <div><dt>Available</dt><dd>${state.account.available.toFixed(2)} XLM</dd></div>
+      <div><dt>Missing trustlines</dt><dd>${missing.length} of ${state.rows.length}</dd></div>
+      <div><dt>Selected</dt><dd>${selected.length}</dd></div>
+      <div><dt>Reserve needed</dt><dd>${cost} XLM</dd></div>
+    </dl>
+    ${notes.join('')}`
+
+  const canSign = selected.length > 0 && !underfunded && !multisig
+  $('actions').hidden = missing.length === 0
+  $('sign').hidden = !canSign
+  $('copy').disabled = selected.length === 0
+  $('download').disabled = selected.length === 0
+  $('sign').textContent =
+    state.batches.length > 1
+      ? `Create ${selected.length} trustlines (${state.batches.length} transactions)`
+      : `Create ${selected.length} trustline${selected.length === 1 ? '' : 's'}`
+}
+
+/**
+ * Reflects the connection in the button and the address beside it. Without
+ * this the button reads "Connect wallet" whether or not one is connected.
+ */
+function renderWalletState(state) {
+  const connected = Boolean(state.walletAddress)
+  $('connect').textContent = connected ? 'Disconnect' : 'Connect wallet'
+  $('wallet-status').hidden = !connected
+  // The badge's markup is in the page, so the address is set as text: the only
+  // string here that the page did not derive itself needs no escaping at all.
+  $('wallet-address').textContent = connected ? short(state.walletAddress) : ''
+}
