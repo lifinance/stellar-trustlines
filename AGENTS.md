@@ -39,8 +39,9 @@ There are no tests, linters or CI in this repo, and the page reads no environmen
 
 - The page only ever builds `ChangeTrust` operations. Keep it that way: partners sign what it builds.
 - Nothing loads from a CDN. New dependencies go through `build/` into `vendor/bundle.min.js`.
-- A `CODE:ISSUER` pair is trusted only after re-deriving its Stellar Asset Contract address; keep that
-  check on every path that produces a pair (see `tokens.js`).
+- On the API path, a `CODE:ISSUER` pair is trusted only after re-deriving its Stellar Asset Contract
+  address (`tokens.js`). When the API fails, `loadManifest()` returns `tokens.json` as is, without that
+  check; do not assume the fallback is verified.
 - Trezor is excluded on purpose: its connector pulls Node built-ins that cannot be bundled.
 
 More: [README.md](README.md) (partner guide, `tokens.json` schema, security notes).
